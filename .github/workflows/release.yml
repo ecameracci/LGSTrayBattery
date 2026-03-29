@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_suffix:
+        description: 'Version suffix (e.g. -fix1). Leave empty for a clean release.'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: 8
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Build
+      run: python .\publish.py --version-suffix="${{ github.event.inputs.version_suffix }}"
+
+    - name: Create release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        $suffix="${{ github.event.inputs.version_suffix }}"
+        $ver=(Select-Xml -Path .\LGSTrayUI\LGSTrayUI.csproj -XPath "//VersionPrefix").Node.InnerText
+        $tag="v$ver$suffix"
+        gh release create $tag `
+          --title "LGSTrayBattery $tag" `
+          --notes "Built from fork with device-persistence fix." `
+          (get-item ./bin/Release/publish/*.zip)
