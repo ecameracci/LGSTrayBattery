@@ -1,5 +1,6 @@
 ﻿using LGSTrayHID.HidApi;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Data;
@@ -21,7 +22,7 @@ namespace LGSTrayHID
         private bool _isReading = true;
         private const int READ_TIMEOUT = 100;
 
-        private readonly Dictionary<ushort, HidppDevice> _deviceCollection = [];
+        private readonly ConcurrentDictionary<ushort, HidppDevice> _deviceCollection = [];
         public IReadOnlyDictionary<ushort, HidppDevice> DeviceCollection => _deviceCollection;
 
         private readonly SemaphoreSlim _semaphore = new(1, 1);
@@ -60,6 +61,14 @@ namespace LGSTrayHID
             if (Interlocked.Increment(ref _disposeCount) == 1)
             {
                 _isReading = false;
+
+                if (disposing)
+                {
+                    foreach (var device in _deviceCollection.Values)
+                    {
+                        device.Stop(signalOffline: true);
+                    }
+                }
 
                 _devShort = IntPtr.Zero;
                 _devLong = IntPtr.Zero;
@@ -108,7 +117,8 @@ namespace LGSTrayHID
                     continue;
                 }
 
-                await ProcessMessgage(buffer);
+                // The buffer is reused by the next read, so hand off a copy
+                await ProcessMessgage((byte[])buffer.Clone());
             }
 
             HidClose(dev);
@@ -116,27 +126,46 @@ namespace LGSTrayHID
 
         private async Task ProcessMessgage(byte[] buffer)
         {
-            if ((buffer[2] == 0x41) && ((buffer[4] & 0x40) == 0))
+            // HID++ 1.0 device connection notification from a receiver
+            if (buffer[2] == 0x41)
             {
                 byte deviceIdx = buffer[1];
-                if (true || !_deviceCollection.ContainsKey(deviceIdx))
+                bool linkEstablished = (buffer[4] & 0x40) == 0;
+#if DEBUG
+                Console.WriteLine($"Device {deviceIdx} link {(linkEstablished ? "established" : "lost")}");
+#endif
+
+                if (linkEstablished)
                 {
-                    _deviceCollection[deviceIdx] = new(this, deviceIdx);
+                    _deviceCollection.TryGetValue(deviceIdx, out var previous);
+                    previous?.Stop(signalOffline: false);
+
+                    HidppDevice device = new(this, deviceIdx, previous?.Identifier ?? string.Empty);
+                    _deviceCollection[deviceIdx] = device;
                     new Thread(async () =>
                     {
                         try
                         {
                             await Task.Delay(1000);
-                            await _deviceCollection[deviceIdx].InitAsync();
+                            await device.InitAsync();
                         }
                         catch (Exception) { }
                     }).Start();
                 }
+                else if (_deviceCollection.TryRemove(deviceIdx, out var device))
+                {
+                    device.Stop(signalOffline: true);
+                }
+
+                return;
             }
-            else
+
+            if (_deviceCollection.TryGetValue(buffer[1], out var target) && target.TryHandleEvent(buffer))
             {
-                await _channel.Writer.WriteAsync(buffer);
+                return;
             }
+
+            await _channel.Writer.WriteAsync(buffer);
         }
 
         public async Task<byte[]> WriteRead10(HidDevicePtr hidDevicePtr, byte[] buffer, int timeout = 100)
@@ -311,9 +340,10 @@ namespace LGSTrayHID
             // Read number of devices on reciever
             ret = await WriteRead10(_devShort, [0x10, 0xFF, 0x81, 0x02, 0x00, 0x00, 0x00], 1000);
             byte numDeviceFound = 0;
-            if ((ret[2] == 0x81) && (ret[3] == 0x02))
+            if ((ret.Length > 5) && (ret[2] == 0x81) && (ret[3] == 0x02))
             {
                 numDeviceFound = ret[5];
+                await EnableConnectionNotifications();
             }
 
             if (numDeviceFound > 0)
@@ -337,11 +367,30 @@ namespace LGSTrayHID
                     }
                 }
 
+                // Devices plugged in directly over USB answer on index 0xFF instead of a receiver slot
+                if (_deviceCollection.IsEmpty && await Ping20(0xFF, 100, false))
+                {
+                    _deviceCollection[0xFF] = new(this, 0xFF);
+                }
+
                 foreach ((_, var device) in _deviceCollection)
                 {
                     await device.InitAsync();
                 }
             }
+        }
+
+        private async Task EnableConnectionNotifications()
+        {
+            // Receiver register 0x00 holds 3 bytes of notification flags; 0x000100 enables
+            // the 0x41 notifications sent when a paired device connects or disconnects.
+            byte[] ret = await WriteRead10(_devShort, [0x10, 0xFF, 0x81, 0x00, 0x00, 0x00, 0x00], 1000);
+            if ((ret.Length < 7) || (ret[2] != 0x81) || (ret[3] != 0x00) || ((ret[5] & 0x01) != 0))
+            {
+                return;
+            }
+
+            await WriteRead10(_devShort, [0x10, 0xFF, 0x80, 0x00, ret[4], (byte)(ret[5] | 0x01), ret[6]], 1000);
         }
     }
 }

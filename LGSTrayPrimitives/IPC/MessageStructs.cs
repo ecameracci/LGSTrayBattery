@@ -42,7 +42,8 @@ public class UpdateMessage(
     PowerSupplyStatus powerSupplyStatus,
     int batteryMVolt,
     DateTimeOffset updateTime,
-    double mileage = -1
+    double mileage = -1,
+    bool isOnline = true
 ) : IPCMessage(deviceId)
 {
     [Key(1)]
@@ -59,6 +60,12 @@ public class UpdateMessage(
 
     [Key(5)]
     public double Mileage = mileage;
+
+    [Key(6)]
+    public bool isOnline = isOnline;
+
+    public static UpdateMessage Offline(string deviceId) =>
+        new(deviceId, -1, PowerSupplyStatus.POWER_SUPPLY_STATUS_UNKNOWN, -1, DateTimeOffset.Now, isOnline: false);
 }
 
 [MessagePackObject]

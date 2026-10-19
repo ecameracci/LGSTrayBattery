@@ -38,6 +38,12 @@ namespace LGSTrayHID.Features
 
             if (ret.Length == 0) { return null; }
 
+            return Parse(ret);
+        }
+
+        // Shared by the GetBatteryVoltage response and the BatteryVoltage event
+        public static BatteryUpdateReturn Parse(Hidpp20 ret)
+        {
             int mv = (ret.GetParam(0) << 8) + ret.GetParam(1);
             double batPercent = LookupBatPercent(mv);
             byte flags = ret.GetParam(2);
