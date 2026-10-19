@@ -12,6 +12,12 @@ namespace LGSTrayHID.Features
 
             if (ret.Length == 0) { return null; }
 
+            return Parse(ret);
+        }
+
+        // Shared by the GetBatteryLevelStatus response and the BatteryLevelStatus broadcast event
+        public static BatteryUpdateReturn Parse(Hidpp20 ret)
+        {
             int mv = -1;
             double batPercent = ret.GetParam(0);
             var status = ret.GetParam(2) switch

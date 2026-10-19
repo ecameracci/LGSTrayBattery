@@ -12,6 +12,12 @@ namespace LGSTrayHID.Features
 
             if (ret.Length == 0) { return null; }
 
+            return Parse(ret);
+        }
+
+        // Shared by the GetStatus response and the BatteryStatus event
+        public static BatteryUpdateReturn Parse(Hidpp20 ret)
+        {
             int mv = -1;
             double batPercent = ret.GetParam(0);
             var status = ret.GetParam(2) switch
@@ -23,6 +29,5 @@ namespace LGSTrayHID.Features
             };
             return new BatteryUpdateReturn(batPercent, status, mv);
         }
-
     }
 }

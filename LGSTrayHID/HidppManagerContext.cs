@@ -3,6 +3,7 @@ using static LGSTrayHID.HidApi.HidApiWinApi;
 using static LGSTrayHID.HidApi.HidApiHotPlug;
 using LGSTrayHID.HidApi;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using LGSTrayPrimitives.MessageStructs;
 
 namespace LGSTrayHID
@@ -15,6 +16,10 @@ namespace LGSTrayHID
         private readonly Dictionary<string, Guid> _containerMap = [];
         private readonly Dictionary<Guid, HidppDevices> _deviceMap = [];
         private readonly BlockingCollection<HidDeviceInfo> _deviceQueue = [];
+
+        // The same physical device can be reachable through more than one path at once,
+        // e.g. via its receiver and over a USB cable while charging.
+        private readonly Dictionary<string, HashSet<HidppDevice>> _onlineSources = [];
 
         public delegate void HidppDeviceEventHandler(IPCMessageType messageType, IPCMessage message);
 
@@ -33,6 +38,43 @@ namespace LGSTrayHID
         public void SignalDeviceEvent(IPCMessageType messageType, IPCMessage message)
         {
             HidppDeviceEvent?.Invoke(messageType, message);
+        }
+
+        public void MarkOnline(HidppDevice device)
+        {
+            lock (_onlineSources)
+            {
+                if (!_onlineSources.TryGetValue(device.Identifier, out var sources))
+                {
+                    sources = [];
+                    _onlineSources[device.Identifier] = sources;
+                }
+                sources.Add(device);
+            }
+        }
+
+        public void MarkOffline(HidppDevice device, bool signal)
+        {
+            if (string.IsNullOrEmpty(device.Identifier)) { return; }
+
+            lock (_onlineSources)
+            {
+                if (_onlineSources.TryGetValue(device.Identifier, out var sources))
+                {
+                    sources.Remove(device);
+                    if (sources.Count > 0)
+                    {
+                        return;
+                    }
+
+                    _onlineSources.Remove(device.Identifier);
+                }
+            }
+
+            if (signal)
+            {
+                SignalDeviceEvent(IPCMessageType.UPDATE, UpdateMessage.Offline(device.Identifier));
+            }
         }
 
         private unsafe int EnqueueDevice(HidHotPlugCallbackHandle _, HidDeviceInfo* device, HidApiHotPlugEvent hidApiHotPlugEvent, nint __)
@@ -114,7 +156,14 @@ namespace LGSTrayHID
                         break;
                     }
 
-                    await InitDevice(dev);
+                    try
+                    {
+                        await InitDevice(dev);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Failed to initialise HID device: {ex}");
+                    }
                 }
             }).Start();
 

@@ -61,10 +61,18 @@ namespace LGSTrayUI
             DeviceName = initMessage.deviceName;
             HasBattery = initMessage.hasBattery;
             DeviceType = initMessage.deviceType;
+            IsOnline = true;
         }
 
         public void UpdateState(UpdateMessage updateMessage)
         {
+            IsOnline = updateMessage.isOnline;
+            if (!updateMessage.isOnline)
+            {
+                // Keep the last known battery reading
+                return;
+            }
+
             BatteryPercentage = updateMessage.batteryPercentage;
             PowerSupplyStatus = updateMessage.powerSupplyStatus;
             BatteryVoltage = updateMessage.batteryMVolt / 1000.0;

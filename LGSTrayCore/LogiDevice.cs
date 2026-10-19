@@ -34,20 +34,34 @@ namespace LGSTrayCore
 
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ToolTipString))]
         private PowerSupplyStatus _powerSupplyStatus;
+
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ToolTipString))]
+        private bool _isOnline;
 
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(ToolTipString))]
         private DateTimeOffset _lastUpdate = DateTimeOffset.MinValue;
 
+        public bool IsPluggedIn => PowerSupplyStatus is PowerSupplyStatus.POWER_SUPPLY_STATUS_CHARGING or PowerSupplyStatus.POWER_SUPPLY_STATUS_FULL;
+
         public string ToolTipString
         {
             get
             {
+                string status = this switch
+                {
+                    { IsOnline: false } => "Disconnected",
+                    { PowerSupplyStatus: PowerSupplyStatus.POWER_SUPPLY_STATUS_CHARGING } => $"{BatteryPercentage:f2}% (Charging)",
+                    { PowerSupplyStatus: PowerSupplyStatus.POWER_SUPPLY_STATUS_FULL } => $"{BatteryPercentage:f2}% (Charged)",
+                    _ => $"{BatteryPercentage:f2}%",
+                };
 #if DEBUG
-                return $"{DeviceName}, {BatteryPercentage:f2}% - {LastUpdate}";
+                return $"{DeviceName}, {status} - {LastUpdate}";
 #else
-                return $"{DeviceName}, {BatteryPercentage:f2}%";
+                return $"{DeviceName}, {status}";
 #endif
             }
         }
@@ -78,6 +92,7 @@ namespace LGSTrayCore
                 $"<battery_voltage>{BatteryVoltage:f2}</battery_voltage>" +
                 $"<mileage>{BatteryMileage:f2}</mileage>" +
                 $"<charging>{PowerSupplyStatus == PowerSupplyStatus.POWER_SUPPLY_STATUS_CHARGING}</charging>" +
+                $"<online>{IsOnline}</online>" +
                 $"<last_update>{LastUpdate}</last_update>" +
                 $"</xml>"
                 ;

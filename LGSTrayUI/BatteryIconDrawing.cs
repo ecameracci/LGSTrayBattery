@@ -64,9 +64,12 @@ namespace LGSTrayUI
             //};
         };
 
+        private const float OfflineOpacity = 0.4f;
+
         private static Bitmap GetBatteryValue(LogiDevice device) => device.BatteryPercentage switch
         {
-            { } when device.PowerSupplyStatus == PowerSupplyStatus.POWER_SUPPLY_STATUS_CHARGING => Charging,
+            { } when !device.IsOnline => Missing,
+            { } when device.IsPluggedIn => Charging,
             < 0 => Missing,
             < 10 => Resources.Indicator_10,
             < 50 => Resources.Indicator_30,
@@ -79,6 +82,7 @@ namespace LGSTrayUI
             DrawIcon(taskbarIcon, new()
             {
                 BatteryPercentage = -1,
+                IsOnline = true,
             });
         }
 
@@ -95,6 +99,10 @@ namespace LGSTrayUI
 
             using var wrapMode = new ImageAttributes();
             wrapMode.SetWrapMode(WrapMode.TileFlipXY);
+            if (!device.IsOnline)
+            {
+                wrapMode.SetColorMatrix(new ColorMatrix { Matrix33 = OfflineOpacity });
+            }
 
             Bitmap[] layers = [
                 GetBatteryValue(device),
@@ -122,11 +130,16 @@ namespace LGSTrayUI
             using Bitmap b = new(ImageSize, ImageSize);
             using Graphics g = Graphics.FromImage(b);
 
-            string displayString = (device.BatteryPercentage < 0) ? "?" : $"{device.BatteryPercentage:f0}";
+            string displayString = (!device.IsOnline || device.BatteryPercentage < 0) ? "?" : $"{device.BatteryPercentage:f0}";
+            Color color = GetDeviceColor(device);
+            if (!device.IsOnline)
+            {
+                color = Color.FromArgb((int)(color.A * OfflineOpacity), color);
+            }
             g.DrawString(
                 displayString,
                 new Font("Segoe UI", (int)(0.8 * ImageSize), GraphicsUnit.Pixel),
-                new SolidBrush(GetDeviceColor(device)),
+                new SolidBrush(color),
                 ImageSize / 2, ImageSize / 2,
                 new(StringFormatFlags.FitBlackBox, 0)
                 {
