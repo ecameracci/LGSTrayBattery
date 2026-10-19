@@ -8,6 +8,9 @@ on:
         required: false
         default: ''
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -38,5 +41,5 @@ jobs:
         $tag="v$ver$suffix"
         gh release create $tag `
           --title "LGSTrayBattery $tag" `
-          --notes "Built from fork with device-persistence fix." `
+          --generate-notes `
           (get-item ./bin/Release/publish/*.zip)
