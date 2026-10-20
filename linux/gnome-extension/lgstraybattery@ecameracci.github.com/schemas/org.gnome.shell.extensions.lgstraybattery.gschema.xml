@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+    <schema id="org.gnome.shell.extensions.lgstraybattery" path="/org/gnome/shell/extensions/lgstraybattery/">
+        <key name="show-percentage" type="b">
+            <default>false</default>
+            <summary>Show battery percentage as a number</summary>
+            <description>Replace the device icon in the top bar with its battery percentage.</description>
+        </key>
+        <key name="logitech-only" type="b">
+            <default>true</default>
+            <summary>Only show Logitech devices</summary>
+            <description>When off, any wireless mouse, keyboard or headset reported by UPower is shown.</description>
+        </key>
+    </schema>
+</schemalist>
