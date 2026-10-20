@@ -1,0 +1,19 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "ecameracci"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Battery level and charging state of Logitech mice, keyboards and headsets",
+        "Icon": "input-mouse",
+        "Id": "com.github.ecameracci.lgstraybattery",
+        "License": "GPL-3.0-only",
+        "Name": "LGSTray Battery",
+        "Version": "3.1.0",
+        "Website": "https://github.com/ecameracci/LGSTrayBattery"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
