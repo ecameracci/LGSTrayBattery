@@ -1,0 +1,16 @@
+{
+    "uuid": "lgstraybattery@ecameracci.github.com",
+    "name": "LGSTray Battery",
+    "description": "Battery level and charging state of Logitech mice, keyboards and headsets in the top bar.",
+    "shell-version": [
+        "45",
+        "46",
+        "47",
+        "48",
+        "49",
+        "50"
+    ],
+    "url": "https://github.com/ecameracci/LGSTrayBattery",
+    "settings-schema": "org.gnome.shell.extensions.lgstraybattery",
+    "version-name": "3.1.0"
+}
