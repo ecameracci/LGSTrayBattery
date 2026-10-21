@@ -1,5 +1,7 @@
-﻿using LGSTrayPrimitives.MessageStructs;
+﻿using LGSTrayPrimitives;
+using LGSTrayPrimitives.MessageStructs;
 using MessagePack.Resolvers;
+using System.Collections.Concurrent;
 using MessagePipe;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
@@ -43,8 +45,14 @@ namespace LGSTrayCore.Managers
         }
         #endregion
 
+        private static readonly TimeSpan FastFailWindow = TimeSpan.FromSeconds(20);
+        private static readonly TimeSpan FastFailBackoff = TimeSpan.FromMinutes(1);
+
         private readonly CancellationTokenSource _cts = new();
         private CancellationTokenSource? _daemonCts;
+
+        // Devices reported by the daemon, so they can be shown as disconnected while it restarts
+        private readonly ConcurrentDictionary<string, byte> _nativeDeviceIds = new();
 
         private readonly IDistributedSubscriber<IPCMessageType, IPCMessage> _subscriber;
         private readonly IPublisher<IPCMessage> _deviceEventBus;
@@ -93,6 +101,12 @@ namespace LGSTrayCore.Managers
                 _daemonCts = null;
             }
 
+            // Its devices can't report anything until a new daemon finds them again
+            foreach (var deviceId in _nativeDeviceIds.Keys)
+            {
+                _deviceEventBus.Publish(UpdateMessage.Offline(deviceId));
+            }
+
             await Task.Delay(1000);
             return proc.ExitCode;
         }
@@ -104,6 +118,7 @@ namespace LGSTrayCore.Managers
                 x =>
                 {
                     var initMessage = (InitMessage)x;
+                    _nativeDeviceIds[initMessage.deviceId] = 0;
                     //_logiDeviceCollection.OnInitMessage(initMessage);
                     _deviceEventBus.Publish(initMessage);
                 },
@@ -135,9 +150,12 @@ namespace LGSTrayCore.Managers
                 {
                     DateTime then = DateTime.Now;
                     int ret = await DaemonLoop();
+                    TimeSpan uptime = DateTime.Now - then;
 
-                    // Daemon returns -1 on .Kill(), assume its user
-                    if ((ret != -1) || (DateTime.Now - then).TotalSeconds < 20)
+                    if (_cts.Token.IsCancellationRequested) { break; }
+
+                    // Daemon returns -1 on .Kill(), i.e. the user asked to rediscover devices
+                    if ((ret != -1) && (uptime < FastFailWindow))
                     {
                         fastFailCount++;
                     }
@@ -146,10 +164,17 @@ namespace LGSTrayCore.Managers
                         fastFailCount = 0;
                     }
 
+                    AppLog.Warn($"HID daemon exited with code {ret} after {uptime:hh\\:mm\\:ss}, restarting");
+
                     if (fastFailCount > 3)
                     {
-                        // Notify user?
-                        break;
+                        AppLog.Error($"HID daemon keeps exiting right after starting, waiting {FastFailBackoff.TotalSeconds:f0}s before trying again");
+                        try
+                        {
+                            await Task.Delay(FastFailBackoff, _cts.Token);
+                        }
+                        catch (OperationCanceledException) { break; }
+                        fastFailCount = 0;
                     }
                 }
             }, CancellationToken.None);

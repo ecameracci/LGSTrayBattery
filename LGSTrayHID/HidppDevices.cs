@@ -1,4 +1,5 @@
 ﻿using LGSTrayHID.HidApi;
+using LGSTrayPrimitives;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -48,7 +49,22 @@ namespace LGSTrayHID
         private int _disposeCount = 0;
         public bool Disposed => _disposeCount > 0;
 
-        public HidppDevices() { }
+        public string Label { get; }
+
+        // Raised when reading from the receiver fails while it's still meant to be open
+        public event Action<HidppDevices>? ReadFailed;
+
+        public HidppDevices(string label)
+        {
+            Label = label;
+        }
+
+        public bool HasHandle(HidppMessageType messageType) => messageType switch
+        {
+            HidppMessageType.SHORT => _devShort != IntPtr.Zero,
+            HidppMessageType.LONG => _devLong != IntPtr.Zero,
+            _ => false,
+        };
 
         public void Dispose()
         {
@@ -110,6 +126,8 @@ namespace LGSTrayHID
 
                 if (ret < 0)
                 {
+                    AppLog.Warn($"Reading from receiver {Label} failed ({bufferSize} byte reports)");
+                    ReadFailed?.Invoke(this);
                     break;
                 }
                 else if (ret == 0)
@@ -117,8 +135,15 @@ namespace LGSTrayHID
                     continue;
                 }
 
-                // The buffer is reused by the next read, so hand off a copy
-                await ProcessMessgage((byte[])buffer.Clone());
+                try
+                {
+                    // The buffer is reused by the next read, so hand off a copy
+                    await ProcessMessgage((byte[])buffer.Clone());
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error($"Receiver {Label}: failed to handle a message", ex);
+                }
             }
 
             HidClose(dev);
@@ -131,26 +156,17 @@ namespace LGSTrayHID
             {
                 byte deviceIdx = buffer[1];
                 bool linkEstablished = (buffer[4] & 0x40) == 0;
-#if DEBUG
-                Console.WriteLine($"Device {deviceIdx} link {(linkEstablished ? "established" : "lost")}");
-#endif
+                _deviceCollection.TryGetValue(deviceIdx, out var previous);
+                string name = string.IsNullOrEmpty(previous?.DeviceName) ? $"device {deviceIdx}" : previous.DeviceName;
+                AppLog.Info($"Receiver {Label}: {name} link {(linkEstablished ? "established" : "lost")}");
 
                 if (linkEstablished)
                 {
-                    _deviceCollection.TryGetValue(deviceIdx, out var previous);
                     previous?.Stop(signalOffline: false);
 
                     HidppDevice device = new(this, deviceIdx, previous?.Identifier ?? string.Empty);
                     _deviceCollection[deviceIdx] = device;
-                    new Thread(async () =>
-                    {
-                        try
-                        {
-                            await Task.Delay(1000);
-                            await device.InitAsync();
-                        }
-                        catch (Exception) { }
-                    }).Start();
+                    _ = Task.Run(device.InitWithRetriesAsync);
                 }
                 else if (_deviceCollection.TryRemove(deviceIdx, out var device))
                 {
@@ -319,9 +335,7 @@ namespace LGSTrayHID
                 return;
             }
             
-#if DEBUG
-            Console.WriteLine("Device ready");
-#endif
+            AppLog.Info($"Receiver {Label} ready");
 
             Thread t1 = new(async () => { await ReadThread(_devShort, 7); })
             {
@@ -345,6 +359,7 @@ namespace LGSTrayHID
                 numDeviceFound = ret[5];
                 await EnableConnectionNotifications();
             }
+            AppLog.Info($"Receiver {Label} reports {numDeviceFound} paired device(s)");
 
             if (numDeviceFound > 0)
             {
@@ -356,6 +371,8 @@ namespace LGSTrayHID
 
             if (_deviceCollection.Count == 0)
             {
+                AppLog.Info($"Receiver {Label} sent no connection notifications, pinging device slots instead");
+
                 // Fail to enumerate devices
                 for (byte i = 1; i <= 6; i++)
                 {
@@ -375,7 +392,14 @@ namespace LGSTrayHID
 
                 foreach ((_, var device) in _deviceCollection)
                 {
-                    await device.InitAsync();
+                    try
+                    {
+                        await device.InitAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Warn($"Receiver {Label}: setting up device {device.DeviceIdx} failed", ex);
+                    }
                 }
             }
         }

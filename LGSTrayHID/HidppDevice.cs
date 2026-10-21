@@ -21,6 +21,7 @@ namespace LGSTrayHID
         private Func<Hidpp20, BatteryUpdateReturn>? _parseBattery;
         private byte _batteryFeatureIdx;
         private volatile bool _isOnline;
+        private bool _pollFailing;
         private readonly object _batteryLock = new();
 
         public string DeviceName { get; private set; } = string.Empty;
@@ -73,7 +74,37 @@ namespace LGSTrayHID
             return true;
         }
 
-        public async Task InitAsync()
+        // A device that just woke up can take a while before it answers, so keep trying for about a minute
+        private static readonly int[] InitRetryDelaysMs = [1000, 2000, 5000, 10000, 30000];
+
+        public async Task InitWithRetriesAsync()
+        {
+            for (int attempt = 1; attempt <= InitRetryDelaysMs.Length; attempt++)
+            {
+                try
+                {
+                    await Task.Delay(InitRetryDelaysMs[attempt - 1], _cts.Token);
+                    if (await InitAsync()) { return; }
+                    AppLog.Warn($"Receiver {_parent.Label}: device {_deviceIdx} didn't answer (attempt {attempt})");
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+                {
+                    // Replaced by a newer connection, or the receiver went away
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Warn($"Receiver {_parent.Label}: setting up device {_deviceIdx} failed (attempt {attempt}): {ex.GetType().Name}: {ex.Message}");
+                }
+
+                if (_cts.IsCancellationRequested || _parent.Disposed) { return; }
+            }
+
+            AppLog.Error($"Receiver {_parent.Label}: gave up setting up device {_deviceIdx} until it reconnects");
+        }
+
+        // Returns false if the device didn't answer and is worth retrying
+        public async Task<bool> InitAsync()
         {
             await _initSemaphore.WaitAsync();
             try
@@ -98,7 +129,7 @@ namespace LGSTrayHID
                     if (successCount >= successThresh) { break; }
                 }
 
-                if (successCount < successThresh) { return; }
+                if (successCount < successThresh) { return false; }
 
                 // Find 0x0001 IFeatureSet
                 ret = await _parent.WriteRead20(_parent.DevShort, new byte[7] { 0x10, _deviceIdx, 0x00, 0x00 | SW_ID, 0x00, 0x01, 0x00 });
@@ -118,6 +149,7 @@ namespace LGSTrayHID
                 }
 
                 await InitPopulateAsync();
+                return true;
             }
             finally
             {
@@ -151,7 +183,7 @@ namespace LGSTrayHID
                 {
                     if (DeviceName.Contains(tag))
                     {
-                        Log.WriteLine($"{DeviceName} is marked as disabled");
+                        AppLog.Info($"{DeviceName} is marked as disabled");
                         return;
                     }
                 };
@@ -162,6 +194,7 @@ namespace LGSTrayHID
             else
             {
                 // Device does not have a name/Hidpp error ignore it
+                AppLog.Info($"Receiver {_parent.Label}: device {_deviceIdx} has no name feature, ignoring it");
                 return;
             }
 
@@ -236,6 +269,7 @@ namespace LGSTrayHID
                 new InitMessage(Identifier, DeviceName, _getBatteryAsync != null, (DeviceType)DeviceType)
             );
             _isOnline = true;
+            AppLog.Info($"Receiver {_parent.Label}: {DeviceName} ready as device {_deviceIdx} ({Identifier}){(_getBatteryAsync == null ? ", no battery feature" : "")}");
 
             await Task.Delay(1000);
 
@@ -274,7 +308,21 @@ namespace LGSTrayHID
 
             var ret = await _getBatteryAsync.Invoke(this);
 
-            if (ret == null) { return; }
+            if (ret == null)
+            {
+                if (!_pollFailing)
+                {
+                    _pollFailing = true;
+                    AppLog.Warn($"{DeviceName}: battery poll got no answer, retrying every {GlobalSettings.settings.RetryTime}s");
+                }
+                return;
+            }
+
+            if (_pollFailing)
+            {
+                _pollFailing = false;
+                AppLog.Info($"{DeviceName}: battery poll answering again");
+            }
 
             ReportBattery(ret.Value, forceIpcUpdate);
         }
@@ -295,6 +343,8 @@ namespace LGSTrayHID
 
                 lastBatteryReturn = batStatus;
             }
+
+            AppLog.Info($"{DeviceName}: {batStatus.batteryPercentage}% {batStatus.status}");
 
             HidppManagerContext.Instance.SignalDeviceEvent(
                 IPCMessageType.UPDATE,
