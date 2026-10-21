@@ -2,8 +2,8 @@
 using static LGSTrayHID.HidApi.HidApiWinApi;
 using static LGSTrayHID.HidApi.HidApiHotPlug;
 using LGSTrayHID.HidApi;
+using LGSTrayPrimitives;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using LGSTrayPrimitives.MessageStructs;
 
 namespace LGSTrayHID
@@ -13,9 +13,18 @@ namespace LGSTrayHID
         public static readonly HidppManagerContext _instance = new();
         public static HidppManagerContext Instance => _instance;
 
+        // The UI restarts the daemon whenever it exits; this code marks a deliberate restart in its log
+        public const int RestartExitCode = 3;
+
+        // How long a receiver that stopped answering has to be reported as removed before the
+        // daemon restarts itself to recover it
+        private const int ReadFailureGraceMs = 5000;
+
+        // Hotplug callbacks and the init thread both touch these, so access goes through _mapLock
+        private readonly object _mapLock = new();
         private readonly Dictionary<string, Guid> _containerMap = [];
         private readonly Dictionary<Guid, HidppDevices> _deviceMap = [];
-        private readonly BlockingCollection<HidDeviceInfo> _deviceQueue = [];
+        private readonly BlockingCollection<(string Path, HidppMessageType Type)> _deviceQueue = [];
 
         // The same physical device can be reachable through more than one path at once,
         // e.g. via its receiver and over a USB cable while charging.
@@ -79,51 +88,73 @@ namespace LGSTrayHID
 
         private unsafe int EnqueueDevice(HidHotPlugCallbackHandle _, HidDeviceInfo* device, HidApiHotPlugEvent hidApiHotPlugEvent, nint __)
         {
-            if (hidApiHotPlugEvent == HidApiHotPlugEvent.HID_API_HOTPLUG_EVENT_DEVICE_ARRIVED)
+            // An exception escaping a native callback kills the process
+            try
             {
-                _deviceQueue.Add(*device);
+                if (hidApiHotPlugEvent == HidApiHotPlugEvent.HID_API_HOTPLUG_EVENT_DEVICE_ARRIVED)
+                {
+                    // hidapi owns the device info, so copy what's needed before it can be freed
+                    var messageType = (*device).GetHidppMessageType();
+                    if (messageType is HidppMessageType.SHORT or HidppMessageType.LONG)
+                    {
+                        _deviceQueue.Add(((*device).GetPath(), messageType));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Failed to queue arriving HID device", ex);
             }
 
             return 0;
         }
 
-        private async Task<int> InitDevice(HidDeviceInfo deviceInfo)
+        private async Task<int> InitDevice(string devPath, HidppMessageType messageType)
         {
-            var messageType = (deviceInfo).GetHidppMessageType();
-            switch (messageType)
+            HidDevicePtr dev = HidOpenPath(devPath);
+            if (dev == IntPtr.Zero)
             {
-                case HidppMessageType.NONE:
-                case HidppMessageType.VERY_LONG:
-                    return 0;
+                AppLog.Warn($"Failed to open {messageType} interface {devPath}");
+                return 0;
             }
 
-            string devPath = (deviceInfo).GetPath();
-
-            HidDevicePtr dev = HidOpenPath(ref deviceInfo);
             _ = HidWinApiGetContainerId(dev, out Guid containerId);
 
 #if DEBUG
             Console.WriteLine(devPath);
             Console.WriteLine(containerId.ToString());
-            Console.WriteLine("x{0:X04}", (deviceInfo).Usage);
-            Console.WriteLine("x{0:X04}", (deviceInfo).UsagePage);
             Console.WriteLine();
 #endif
 
-            if (!_deviceMap.TryGetValue(containerId, out HidppDevices? value))
+            HidppDevices receiver;
+            lock (_mapLock)
             {
-                value = new();
-                _deviceMap[containerId] = value;
+                if (!_deviceMap.TryGetValue(containerId, out receiver!))
+                {
+                    receiver = new(containerId.ToString());
+                    receiver.ReadFailed += OnReadFailed;
+                    _deviceMap[containerId] = receiver;
+                }
                 _containerMap[devPath] = containerId;
             }
+
+            if (receiver.HasHandle(messageType))
+            {
+                // Windows re-announced an interface without reporting its removal, so the old handle is dead
+                HidClose(dev);
+                RequestRestart($"Receiver {containerId} re-announced its {messageType} interface without being removed");
+                return 0;
+            }
+
+            AppLog.Info($"Opened {messageType} interface of receiver {containerId}");
 
             switch (messageType)
             {
                 case HidppMessageType.SHORT:
-                    await value.SetDevShort(dev);
+                    await receiver.SetDevShort(dev);
                     break;
                 case HidppMessageType.LONG:
-                    await value.SetDevLong(dev);
+                    await receiver.SetDevLong(dev);
                     break;
             }
 
@@ -132,16 +163,61 @@ namespace LGSTrayHID
 
         private unsafe int DeviceLeft(HidHotPlugCallbackHandle callbackHandle, HidDeviceInfo* deviceInfo, HidApiHotPlugEvent hidApiHotPlugEvent, nint userData)
         {
-            string devPath = (*deviceInfo).GetPath();
-
-            if (_containerMap.TryGetValue(devPath, out var containerId))
+            try
             {
-                _deviceMap[containerId].Dispose();
-                _deviceMap.Remove(containerId);
-                _containerMap.Remove(devPath);
+                string devPath = (*deviceInfo).GetPath();
+                HidppDevices? removed = null;
+                Guid containerId = Guid.Empty;
+
+                lock (_mapLock)
+                {
+                    if (_containerMap.TryGetValue(devPath, out containerId) && _deviceMap.Remove(containerId, out removed))
+                    {
+                        foreach (var path in _containerMap.Where(x => x.Value == containerId).Select(x => x.Key).ToList())
+                        {
+                            _containerMap.Remove(path);
+                        }
+                    }
+                }
+
+                if (removed != null)
+                {
+                    AppLog.Info($"Receiver {containerId} removed");
+                    removed.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("Failed to handle HID device removal", ex);
             }
 
             return 0;
+        }
+
+        private void OnReadFailed(HidppDevices receiver)
+        {
+            // A real unplug also fails the read, shortly before Windows reports the removal
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(ReadFailureGraceMs);
+
+                bool stillListed;
+                lock (_mapLock)
+                {
+                    stillListed = _deviceMap.ContainsValue(receiver);
+                }
+
+                if (stillListed && !receiver.Disposed)
+                {
+                    RequestRestart($"Receiver {receiver.Label} stopped responding but is still connected");
+                }
+            });
+        }
+
+        private static void RequestRestart(string reason)
+        {
+            AppLog.Warn($"{reason}; restarting the daemon to recover");
+            Environment.Exit(RestartExitCode);
         }
 
         public void Start(CancellationToken cancellationToken)
@@ -150,7 +226,7 @@ namespace LGSTrayHID
             {
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    var dev = _deviceQueue.Take();
+                    var (path, type) = _deviceQueue.Take();
                     if (cancellationToken.IsCancellationRequested)
                     {
                         break;
@@ -158,11 +234,11 @@ namespace LGSTrayHID
 
                     try
                     {
-                        await InitDevice(dev);
+                        await InitDevice(path, type);
                     }
                     catch (Exception ex)
                     {
-                        Debug.WriteLine($"Failed to initialise HID device: {ex}");
+                        AppLog.Error($"Failed to initialise HID device {path}", ex);
                     }
                 }
             }).Start();
@@ -173,12 +249,18 @@ namespace LGSTrayHID
                 HidHotplugRegisterCallback(0x046D, 0x00, HidApiHotPlugEvent.HID_API_HOTPLUG_EVENT_DEVICE_LEFT, HidApiHotPlugFlag.NONE, DeviceLeft, IntPtr.Zero, (int*)IntPtr.Zero);
             }
         }
-    
+
         public async Task ForceBatteryUpdates()
         {
-            foreach (var (_, hidppDevice) in _deviceMap)
+            List<HidppDevices> receivers;
+            lock (_mapLock)
             {
-                var tasks = hidppDevice.DeviceCollection
+                receivers = [.. _deviceMap.Values];
+            }
+
+            foreach (var receiver in receivers)
+            {
+                var tasks = receiver.DeviceCollection
                     .Select(x => x.Value)
                     .Select(x => x.UpdateBattery(true));
 

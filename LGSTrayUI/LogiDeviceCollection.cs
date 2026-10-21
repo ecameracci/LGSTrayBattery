@@ -1,4 +1,5 @@
 ﻿using LGSTrayCore;
+using LGSTrayPrimitives;
 using LGSTrayPrimitives.MessageStructs;
 using MessagePipe;
 using System;
@@ -73,6 +74,8 @@ namespace LGSTrayUI
 
         public void OnInitMessage(InitMessage initMessage)
         {
+            AppLog.Info($"{initMessage.deviceName} ({initMessage.deviceId}) announced");
+
             LogiDeviceViewModel? dev = Devices.SingleOrDefault(x => x.DeviceId == initMessage.deviceId);
             if (dev != null)
             {
@@ -97,6 +100,11 @@ namespace LGSTrayUI
             {
                 var device = Devices.FirstOrDefault(dev => dev.DeviceId == updateMessage.deviceId);
                 if (device == null) { return; }
+
+                if (device.IsOnline != updateMessage.isOnline)
+                {
+                    AppLog.Info($"{device.DeviceName} is now {(updateMessage.isOnline ? "online" : "offline")}");
+                }
 
                 device.UpdateState(updateMessage);
             });

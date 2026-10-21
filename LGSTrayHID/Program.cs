@@ -17,6 +17,9 @@ namespace LGSTrayHID
     {
         static async Task Main(string[] args)
         {
+            AppLog.Init("hid");
+            AppDomain.CurrentDomain.UnhandledException += (_, e) => AppLog.Error("Unhandled exception, daemon exiting", e.ExceptionObject as Exception);
+
             var builder = Host.CreateEmptyApplicationBuilder(null);
             builder.Configuration.AddTomlFile("appsettings.toml");
 

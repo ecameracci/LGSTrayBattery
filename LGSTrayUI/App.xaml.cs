@@ -26,6 +26,7 @@ public partial class App : Application
         base.OnStartup(e);
 
         Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+        AppLog.Init("ui");
         Thread.CurrentThread.CurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         AppDomain.CurrentDomain.UnhandledException += new UnhandledExceptionEventHandler(CrashHandler);
@@ -92,6 +93,7 @@ public partial class App : Application
     private void CrashHandler(object sender, UnhandledExceptionEventArgs args)
     {
         Exception e = (Exception)args.ExceptionObject;
+        AppLog.Error("Unhandled exception, exiting", e);
         long unixTime = DateTimeOffset.Now.ToUnixTimeSeconds();
 
         using StreamWriter writer = new($"./crashlog_{unixTime}.log", false);
